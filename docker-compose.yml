@@ -1,0 +1,54 @@
+# One-command stack:  cp .env.example .env && docker compose up --build
+x-backend: &backend
+  build: ./backend
+  env_file: .env
+  environment: &backend-env
+    TESTPILOT_DATABASE_URL: postgresql+psycopg2://testpilot:${POSTGRES_PASSWORD:-testpilot}@postgres:5432/testpilot
+    TESTPILOT_REDIS_URL: redis://redis:6379/0
+    TESTPILOT_EXECUTION_MODE: celery
+    # DEMO ONLY: lets the worker call the bundled demo API on the private Docker network.
+    # Remove this for real deployments so the SSRF guard blocks all private addresses.
+    TESTPILOT_SSRF_ALLOWED_HOSTS: demo-api
+  depends_on:
+    postgres: { condition: service_healthy }
+    redis: { condition: service_started }
+
+services:
+  postgres:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_USER: testpilot
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-testpilot}
+      POSTGRES_DB: testpilot
+    volumes: [pgdata:/var/lib/postgresql/data]
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U testpilot"]
+      interval: 5s
+      retries: 10
+
+  redis:
+    image: redis:7-alpine
+
+  api:
+    <<: *backend
+    ports: ["8000:8000"]
+
+  worker:
+    <<: *backend
+    command: celery -A app.worker.celery_app.celery_app worker --loglevel=INFO --concurrency=2
+
+  beat:
+    <<: *backend
+    command: celery -A app.worker.celery_app.celery_app beat --loglevel=INFO --schedule=/tmp/celerybeat-schedule
+
+  frontend:
+    build: ./frontend
+    ports: ["8080:80"]
+    depends_on: [api]
+
+  demo-api:
+    build: ./demo_target
+    ports: ["9000:9000"]
+
+volumes:
+  pgdata:

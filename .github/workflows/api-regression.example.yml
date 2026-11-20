@@ -1,0 +1,14 @@
+# Example: gate deployments on TestPilot. Rename to api-regression.yml and set
+# vars.TESTPILOT_URL and secrets.TESTPILOT_API_KEY (create the key in Project > Settings).
+name: API regression
+on: { workflow_dispatch: {}, push: { branches: [main] } }
+jobs:
+  regression:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - run: ./scripts/testpilot-ci.sh
+        env:
+          TESTPILOT_URL: ${{ vars.TESTPILOT_URL }}
+          TESTPILOT_API_KEY: ${{ secrets.TESTPILOT_API_KEY }}
+          TESTPILOT_LABEL: ${{ github.sha }}
