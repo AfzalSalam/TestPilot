@@ -3,7 +3,7 @@ from pydantic import BaseModel
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
-import jwt
+import httpx
 
 from app.config import get_settings
 from app.database import get_db
@@ -26,28 +26,38 @@ class GoogleTokenIn(BaseModel):
 
 @router.post("/google", response_model=TokenOut, summary="Sign in via Google / Supabase OAuth")
 def google_login(body: GoogleTokenIn, db: Session = Depends(get_db)):
-    """Exchange a Supabase access token for a TestPilot JWT."""
+    """Exchange a Supabase access token for a TestPilot JWT.
+    Verifies by calling Supabase's /auth/v1/user — works with any JWT signing algorithm.
+    """
     settings = get_settings()
-    if not settings.supabase_jwt_secret:
+    if not settings.supabase_url or not settings.supabase_anon_key:
         raise AppError(501, "not_configured", "Google login is not configured on this server")
 
+    # Let Supabase verify its own token (works with HS256 and ECC P-256)
     try:
-        payload = jwt.decode(
-            body.access_token,
-            settings.supabase_jwt_secret,
-            algorithms=["HS256"],
-            options={"verify_aud": False},
+        resp = httpx.get(
+            f"{settings.supabase_url}/auth/v1/user",
+            headers={
+                "Authorization": f"Bearer {body.access_token}",
+                "apikey": settings.supabase_anon_key,
+            },
+            timeout=10,
         )
-    except jwt.PyJWTError:
+    except httpx.RequestError:
+        raise AppError(503, "upstream_error", "Could not reach Supabase to verify token")
+
+    if resp.status_code != 200:
         raise AppError(401, "invalid_token", "Invalid or expired Google token")
 
-    email = payload.get("email")
+    user_data = resp.json()
+    email = user_data.get("email")
     if not email:
         raise AppError(401, "invalid_token", "Token does not contain an email address")
 
     user = db.scalar(select(User).where(User.email == email))
     if not user:
-        full_name = (payload.get("user_metadata") or {}).get("full_name") or email.split("@")[0]
+        meta = user_data.get("user_metadata") or {}
+        full_name = meta.get("full_name") or meta.get("name") or email.split("@")[0]
         user = User(email=email, full_name=full_name, hashed_password="")
         db.add(user)
         db.commit()
