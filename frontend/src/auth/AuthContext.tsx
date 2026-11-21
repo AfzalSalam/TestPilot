@@ -27,34 +27,42 @@ export function AuthProvider({ children }: { children: ReactNode }) {
 
   useEffect(() => { setUnauthorizedHandler(logout); }, [logout]);
 
+  const exchangeSupabaseToken = useCallback(async (accessToken: string) => {
+    try {
+      const res = await http.post<TokenResponse>("/auth/google", { access_token: accessToken });
+      tokenStore.set(res.access_token);
+      setUser(res.user);
+    } catch {
+      tokenStore.clear();
+      setUser(null);
+    } finally {
+      setLoading(false);
+    }
+  }, []);
+
   useEffect(() => {
-    // Listen for Supabase auth state changes (e.g. after Google OAuth redirect)
-    const { data: { subscription } } = supabase.auth.onAuthStateChange(async (_event, session) => {
-      if (session?.access_token) {
-        try {
-          // Exchange Supabase token for a TestPilot JWT
-          const res = await http.post<TokenResponse>("/auth/google", { access_token: session.access_token });
-          tokenStore.set(res.access_token);
-          setUser(res.user);
-        } catch {
-          tokenStore.clear();
-        } finally {
-          setLoading(false);
-        }
+    // Check for an existing Supabase session on mount (handles OAuth redirect case)
+    supabase.auth.getSession().then(({ data: { session } }) => {
+      if (session?.access_token && !tokenStore.get()) {
+        // Google OAuth just landed — exchange for TestPilot JWT
+        exchangeSupabaseToken(session.access_token);
+      } else if (tokenStore.get()) {
+        // Already have a TestPilot token — verify it
+        http.get<User>("/auth/me").then(setUser).catch(() => tokenStore.clear()).finally(() => setLoading(false));
       } else {
         setLoading(false);
       }
     });
 
-    if (tokenStore.get()) {
-      http.get<User>("/auth/me").then(setUser).catch(() => tokenStore.clear()).finally(() => setLoading(false));
-    }
+    // Also listen for future auth changes
+    const { data: { subscription } } = supabase.auth.onAuthStateChange(async (_event, session) => {
+      if (session?.access_token && !tokenStore.get()) {
+        exchangeSupabaseToken(session.access_token);
+      }
+    });
 
-    return () => {
-      subscription.unsubscribe();
-    };
-  }, []);
-
+    return () => { subscription.unsubscribe(); };
+  }, [exchangeSupabaseToken]);
   const accept = (res: TokenResponse) => { tokenStore.set(res.access_token); setUser(res.user); };
   const value = useMemo<AuthState>(() => ({
     user, loading, logout,
