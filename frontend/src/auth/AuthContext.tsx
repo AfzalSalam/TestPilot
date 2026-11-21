@@ -31,15 +31,18 @@ export function AuthProvider({ children }: { children: ReactNode }) {
     // Listen for Supabase auth state changes (e.g. after Google OAuth redirect)
     const { data: { subscription } } = supabase.auth.onAuthStateChange(async (_event, session) => {
       if (session?.access_token) {
-        tokenStore.set(session.access_token);
         try {
-          const me = await http.get<User>("/auth/me");
-          setUser(me);
+          // Exchange Supabase token for a TestPilot JWT
+          const res = await http.post<TokenResponse>("/auth/google", { access_token: session.access_token });
+          tokenStore.set(res.access_token);
+          setUser(res.user);
         } catch {
           tokenStore.clear();
         } finally {
           setLoading(false);
         }
+      } else {
+        setLoading(false);
       }
     });
 
