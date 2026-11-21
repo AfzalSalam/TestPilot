@@ -117,7 +117,6 @@ export default function LoginPage() {
             </svg>
             Continue with Google
           </Button>
-          <p className="faint" style={{ fontSize: 12.5, textAlign: "center", marginTop: 14 }}>Demo data? Run <span className="mono">scripts/seed_demo.py</span> then sign in as <span className="mono">demo@testpilot.dev</span> / <span className="mono">demo-pass-123</span></p>
         </form>
       </section>
     </div>
