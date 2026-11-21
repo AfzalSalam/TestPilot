@@ -31,6 +31,7 @@ class Settings(BaseSettings):
     # --- security --------------------------------------------------------
     secret_key: str = DEFAULT_SECRET
     encryption_key: str = ""  # Fernet key; derived from secret_key when empty
+    supabase_jwt_secret: str = ""  # Supabase Dashboard -> Settings -> API -> JWT Secret
     access_token_expire_minutes: int = 60 * 12
     cors_origins: str = "http://localhost:5173,http://127.0.0.1:5173"
 

@@ -2,6 +2,7 @@ import { useQueryClient } from "@tanstack/react-query";
 import { createContext, useCallback, useContext, useEffect, useMemo, useState, type ReactNode } from "react";
 import { http, setUnauthorizedHandler, tokenStore } from "@/api/client";
 import type { TokenResponse, User } from "@/api/types";
+import { supabase } from "@/lib/supabase";
 
 interface AuthState {
   user: User | null;
@@ -18,6 +19,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
   const [loading, setLoading] = useState<boolean>(!!tokenStore.get());
 
   const logout = useCallback(() => {
+    supabase.auth.signOut().catch(() => {});
     tokenStore.clear();
     setUser(null);
     qc.clear(); // never leak one user's cached data to the next
@@ -26,8 +28,28 @@ export function AuthProvider({ children }: { children: ReactNode }) {
   useEffect(() => { setUnauthorizedHandler(logout); }, [logout]);
 
   useEffect(() => {
-    if (!tokenStore.get()) return;
-    http.get<User>("/auth/me").then(setUser).catch(() => tokenStore.clear()).finally(() => setLoading(false));
+    // Listen for Supabase auth state changes (e.g. after Google OAuth redirect)
+    const { data: { subscription } } = supabase.auth.onAuthStateChange(async (_event, session) => {
+      if (session?.access_token) {
+        tokenStore.set(session.access_token);
+        try {
+          const me = await http.get<User>("/auth/me");
+          setUser(me);
+        } catch {
+          tokenStore.clear();
+        } finally {
+          setLoading(false);
+        }
+      }
+    });
+
+    if (tokenStore.get()) {
+      http.get<User>("/auth/me").then(setUser).catch(() => tokenStore.clear()).finally(() => setLoading(false));
+    }
+
+    return () => {
+      subscription.unsubscribe();
+    };
   }, []);
 
   const accept = (res: TokenResponse) => { tokenStore.set(res.access_token); setUser(res.user); };
