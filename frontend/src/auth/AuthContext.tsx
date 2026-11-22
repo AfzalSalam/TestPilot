@@ -1,5 +1,5 @@
 import { useQueryClient } from "@tanstack/react-query";
-import { createContext, useCallback, useContext, useEffect, useMemo, useState, type ReactNode } from "react";
+import { createContext, useCallback, useContext, useEffect, useMemo, useRef, useState, type ReactNode } from "react";
 import { http, setUnauthorizedHandler, tokenStore } from "@/api/client";
 import type { TokenResponse, User } from "@/api/types";
 import { supabase } from "@/lib/supabase";
@@ -17,6 +17,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
   const qc = useQueryClient();
   const [user, setUser] = useState<User | null>(null);
   const [loading, setLoading] = useState<boolean>(!!tokenStore.get());
+  const exchanging = useRef(false); // prevent double-call to /auth/google
 
   const logout = useCallback(() => {
     supabase.auth.signOut().catch(() => {});
@@ -28,6 +29,8 @@ export function AuthProvider({ children }: { children: ReactNode }) {
   useEffect(() => { setUnauthorizedHandler(logout); }, [logout]);
 
   const exchangeSupabaseToken = useCallback(async (accessToken: string) => {
+    if (exchanging.current) return; // already in-flight, skip duplicate call
+    exchanging.current = true;
     try {
       const res = await http.post<TokenResponse>("/auth/google", { access_token: accessToken });
       tokenStore.set(res.access_token);
@@ -37,32 +40,30 @@ export function AuthProvider({ children }: { children: ReactNode }) {
       setUser(null);
     } finally {
       setLoading(false);
+      exchanging.current = false;
     }
   }, []);
 
   useEffect(() => {
-    // Check for an existing Supabase session on mount (handles OAuth redirect case)
-    supabase.auth.getSession().then(({ data: { session } }) => {
+    // onAuthStateChange fires on mount with INITIAL_SESSION event (handles OAuth redirect too)
+    const { data: { subscription } } = supabase.auth.onAuthStateChange(async (_event, session) => {
       if (session?.access_token && !tokenStore.get()) {
-        // Google OAuth just landed — exchange for TestPilot JWT
+        // Supabase session present but no TestPilot token — exchange it
         exchangeSupabaseToken(session.access_token);
-      } else if (tokenStore.get()) {
-        // Already have a TestPilot token — verify it
-        http.get<User>("/auth/me").then(setUser).catch(() => tokenStore.clear()).finally(() => setLoading(false));
-      } else {
+      } else if (!session && !tokenStore.get()) {
+        // No session at all — stop loading
         setLoading(false);
       }
     });
 
-    // Also listen for future auth changes
-    const { data: { subscription } } = supabase.auth.onAuthStateChange(async (_event, session) => {
-      if (session?.access_token && !tokenStore.get()) {
-        exchangeSupabaseToken(session.access_token);
-      }
-    });
+    // If we already have a TestPilot token, verify it
+    if (tokenStore.get()) {
+      http.get<User>("/auth/me").then(setUser).catch(() => tokenStore.clear()).finally(() => setLoading(false));
+    }
 
     return () => { subscription.unsubscribe(); };
   }, [exchangeSupabaseToken]);
+
   const accept = (res: TokenResponse) => { tokenStore.set(res.access_token); setUser(res.user); };
   const value = useMemo<AuthState>(() => ({
     user, loading, logout,
