@@ -39,19 +39,30 @@ export async function request<T>(method: string, path: string, opts: { body?: un
   if (token) headers.Authorization = `Bearer ${token}`;
   if (opts.body !== undefined) headers["Content-Type"] = "application/json";
 
+  // Retry once on network error (handles Render free-tier cold starts ~30s)
   let res: Response;
-  try {
-    res = await fetch(url, { method, headers, body: opts.body !== undefined ? JSON.stringify(opts.body) : undefined });
-  } catch {
-    throw new ApiError(0, "network_error", "Cannot reach the TestPilot API. Is the backend running?");
+  let lastError: unknown;
+  for (let attempt = 0; attempt < 2; attempt++) {
+    try {
+      res = await fetch(url, { method, headers, body: opts.body !== undefined ? JSON.stringify(opts.body) : undefined });
+      lastError = null;
+      break;
+    } catch (err) {
+      lastError = err;
+      if (attempt === 0) await new Promise(r => setTimeout(r, 3000)); // wait 3s before retry
+    }
   }
-  if (res.status === 204) return undefined as T;
+  if (lastError) {
+    throw new ApiError(0, "network_error", "Cannot reach the server — it may be waking up. Please try again in a few seconds.");
+  }
 
-  const data = await res.json().catch(() => null);
-  if (!res.ok) {
+  if (res!.status === 204) return undefined as T;
+
+  const data = await res!.json().catch(() => null);
+  if (!res!.ok) {
     const err = data?.error;
-    const error = new ApiError(res.status, err?.code ?? "http_error", err?.message ?? res.statusText, err?.details);
-    if (res.status === 401 && token && path !== "/auth/login") onUnauthorized();
+    const error = new ApiError(res!.status, err?.code ?? "http_error", err?.message ?? res!.statusText, err?.details);
+    if (res!.status === 401 && token && path !== "/auth/login") onUnauthorized();
     throw error;
   }
   return data as T;
