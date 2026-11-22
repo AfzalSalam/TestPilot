@@ -33,7 +33,6 @@ class Settings(BaseSettings):
     encryption_key: str = ""  # Fernet key; derived from secret_key when empty
     supabase_url: str = ""       # e.g. https://xxxx.supabase.co
     supabase_anon_key: str = ""  # Supabase Dashboard -> Settings -> API -> anon public key
-    supabase_jwt_secret: str = ""  # kept for legacy; no longer used for verification
     access_token_expire_minutes: int = 60 * 12
     cors_origins: str = "http://localhost:5173,http://127.0.0.1:5173"
 

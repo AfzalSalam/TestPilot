@@ -2,13 +2,11 @@
 
 from dataclasses import dataclass
 
-import jwt
 from fastapi import Depends, Header
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
-from app.config import get_settings
 from app.database import get_db
 from app.errors import AppError
 from app.models import ApiKey, Project, ProjectMember, User
@@ -28,31 +26,8 @@ def get_current_user(
         raise AppError(401, "not_authenticated", "Authentication required")
 
     token = credentials.credentials
-    settings = get_settings()
 
-    # 1. Check if token is a Supabase JWT
-    if settings.supabase_jwt_secret:
-        try:
-            payload = jwt.decode(
-                token,
-                settings.supabase_jwt_secret,
-                algorithms=["HS256"],
-                options={"verify_aud": False},
-            )
-            email = payload.get("email")
-            if email:
-                user = db.scalar(select(User).where(User.email == email))
-                if not user:
-                    full_name = payload.get("user_metadata", {}).get("full_name") or email.split("@")[0]
-                    user = User(email=email, full_name=full_name, hashed_password="")
-                    db.add(user)
-                    db.commit()
-                    db.refresh(user)
-                return user
-        except jwt.PyJWTError:
-            pass  # Fall back to native TestPilot token
-
-    # 2. Native TestPilot JWT
+    # Verify native TestPilot JWT (issued by /auth/login, /auth/register, /auth/google)
     payload = decode_access_token(token)
     try:
         user_id = int(payload["sub"])
