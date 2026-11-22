@@ -16,7 +16,10 @@ const Ctx = createContext<AuthState | null>(null);
 export function AuthProvider({ children }: { children: ReactNode }) {
   const qc = useQueryClient();
   const [user, setUser] = useState<User | null>(null);
-  const [loading, setLoading] = useState<boolean>(!!tokenStore.get());
+  // Start loading if we have a token OR if we're landing from an OAuth redirect
+  const [loading, setLoading] = useState<boolean>(
+    !!tokenStore.get() || window.location.hash.includes("access_token")
+  );
   const exchanging = useRef(false); // prevent double-call to /auth/google
 
   const logout = useCallback(() => {
@@ -31,6 +34,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
   const exchangeSupabaseToken = useCallback(async (accessToken: string) => {
     if (exchanging.current) return; // already in-flight, skip duplicate call
     exchanging.current = true;
+    setLoading(true); // show spinner while exchanging
     try {
       const res = await http.post<TokenResponse>("/auth/google", { access_token: accessToken });
       tokenStore.set(res.access_token);
