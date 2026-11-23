@@ -1,9 +1,12 @@
+import logging
+from functools import lru_cache
+
+import httpx
+import jwt
 from fastapi import APIRouter, Depends, Request
 from pydantic import BaseModel
 from sqlalchemy import select
 from sqlalchemy.orm import Session
-
-import httpx
 
 from app.config import get_settings
 from app.database import get_db
@@ -13,6 +16,8 @@ from app.models import User
 from app.ratelimit import check_rate, client_ip
 from app.schemas import LoginIn, TokenOut, UserCreate, UserOut
 from app.security import create_access_token, hash_password, verify_password
+
+logger = logging.getLogger("testpilot.auth")
 
 router = APIRouter(prefix="/auth", tags=["Authentication"])
 
@@ -24,32 +29,63 @@ class GoogleTokenIn(BaseModel):
     access_token: str
 
 
+@lru_cache(maxsize=4)
+def _get_jwk_client(jwks_url: str) -> jwt.PyJWKClient:
+    return jwt.PyJWKClient(jwks_url, cache_keys=True)
+
+
+def _verify_supabase_token(token: str, supabase_url: str, anon_key: str) -> dict:
+    """Verify Supabase JWT. First tries local cryptographic verification via JWKS (no rate limits).
+    Falls back to Supabase's /auth/v1/user endpoint if needed.
+    """
+    # 1. Try local JWKS verification (cached, ultra-fast, zero rate-limit issues)
+    jwks_url = f"{supabase_url.rstrip('/')}/auth/v1/.well-known/jwks.json"
+    try:
+        client = _get_jwk_client(jwks_url)
+        signing_key = client.get_signing_key_from_jwt(token)
+        payload = jwt.decode(
+            token,
+            signing_key.key,
+            algorithms=["ES256", "RS256", "HS256"],
+            options={"verify_aud": False},
+        )
+        if payload.get("email"):
+            return payload
+    except Exception as exc:
+        logger.info("JWKS verification unsuccessful (%s), trying /auth/v1/user fallback", exc)
+
+    # 2. Fallback: ask Supabase directly
+    try:
+        resp = httpx.get(
+            f"{supabase_url.rstrip('/')}/auth/v1/user",
+            headers={
+                "Authorization": f"Bearer {token}",
+                "apikey": anon_key,
+            },
+            timeout=10,
+        )
+    except httpx.RequestError as exc:
+        raise AppError(503, "upstream_error", "Could not reach Supabase to verify token") from exc
+
+    if resp.status_code == 429:
+        logger.warning("Supabase /auth/v1/user rate limit exceeded")
+        raise AppError(429, "rate_limited", "Authentication rate limit reached. Please wait a minute and try again.")
+    if resp.status_code != 200:
+        logger.warning("Supabase token verification failed: HTTP %s - %s", resp.status_code, resp.text)
+        raise AppError(401, "invalid_token", "Invalid or expired Google token")
+
+    return resp.json()
+
+
 @router.post("/google", response_model=TokenOut, summary="Sign in via Google / Supabase OAuth")
 def google_login(body: GoogleTokenIn, db: Session = Depends(get_db)):
-    """Exchange a Supabase access token for a TestPilot JWT.
-    Verifies by calling Supabase's /auth/v1/user — works with any JWT signing algorithm.
-    """
+    """Exchange a Supabase access token for a TestPilot JWT."""
     settings = get_settings()
     if not settings.supabase_url or not settings.supabase_anon_key:
         raise AppError(501, "not_configured", "Google login is not configured on this server")
 
-    # Let Supabase verify its own token (works with HS256 and ECC P-256)
-    try:
-        resp = httpx.get(
-            f"{settings.supabase_url}/auth/v1/user",
-            headers={
-                "Authorization": f"Bearer {body.access_token}",
-                "apikey": settings.supabase_anon_key,
-            },
-            timeout=10,
-        )
-    except httpx.RequestError:
-        raise AppError(503, "upstream_error", "Could not reach Supabase to verify token")
+    user_data = _verify_supabase_token(body.access_token, settings.supabase_url, settings.supabase_anon_key)
 
-    if resp.status_code != 200:
-        raise AppError(401, "invalid_token", "Invalid or expired Google token")
-
-    user_data = resp.json()
     email = user_data.get("email")
     if not email:
         raise AppError(401, "invalid_token", "Token does not contain an email address")

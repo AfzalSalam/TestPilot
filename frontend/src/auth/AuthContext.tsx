@@ -16,11 +16,16 @@ const Ctx = createContext<AuthState | null>(null);
 export function AuthProvider({ children }: { children: ReactNode }) {
   const qc = useQueryClient();
   const [user, setUser] = useState<User | null>(null);
-  // Start loading if we have a token OR if we're landing from an OAuth redirect
-  const [loading, setLoading] = useState<boolean>(
-    !!tokenStore.get() || window.location.hash.includes("access_token")
-  );
-  const exchanging = useRef(false); // prevent double-call to /auth/google
+
+  // Check if landing from Google OAuth redirect (URL contains #access_token)
+  const isOAuthRedirect = typeof window !== "undefined" && window.location.hash.includes("access_token");
+
+  // Initial loading state: true if we have a token stored or are landing from OAuth redirect
+  const [loading, setLoading] = useState<boolean>(!!tokenStore.get() || isOAuthRedirect);
+
+  // Prevent multiple calls to /auth/google for the same token or concurrently
+  const exchangingRef = useRef(false);
+  const handledTokensRef = useRef<Set<string>>(new Set());
 
   const logout = useCallback(() => {
     supabase.auth.signOut().catch(() => {});
@@ -32,30 +37,40 @@ export function AuthProvider({ children }: { children: ReactNode }) {
   useEffect(() => { setUnauthorizedHandler(logout); }, [logout]);
 
   const exchangeSupabaseToken = useCallback(async (accessToken: string) => {
-    if (exchanging.current) return; // already in-flight, skip duplicate call
-    exchanging.current = true;
-    setLoading(true); // show spinner while exchanging
+    if (!accessToken || handledTokensRef.current.has(accessToken) || exchangingRef.current) {
+      return;
+    }
+    handledTokensRef.current.add(accessToken);
+    exchangingRef.current = true;
+    setLoading(true);
+
+    // Clean hash from URL so reloads/navigation don't re-trigger OAuth processing
+    if (window.location.hash && window.location.hash.includes("access_token")) {
+      window.history.replaceState(null, "", window.location.pathname + window.location.search);
+    }
+
     try {
       const res = await http.post<TokenResponse>("/auth/google", { access_token: accessToken });
       tokenStore.set(res.access_token);
       setUser(res.user);
-    } catch {
+      // Supabase OAuth succeeded; sign out Supabase client to prevent duplicate events & auto-refresh
+      supabase.auth.signOut().catch(() => {});
+    } catch (err) {
       tokenStore.clear();
       setUser(null);
+      console.error("Google sign-in exchange failed:", err);
     } finally {
       setLoading(false);
-      exchanging.current = false;
+      exchangingRef.current = false;
     }
   }, []);
 
   useEffect(() => {
-    // onAuthStateChange fires on mount with INITIAL_SESSION event (handles OAuth redirect too)
-    const { data: { subscription } } = supabase.auth.onAuthStateChange(async (_event, session) => {
+    // Listen for Supabase auth state changes (OAuth redirect initial session)
+    const { data: { subscription } } = supabase.auth.onAuthStateChange((_event, session) => {
       if (session?.access_token && !tokenStore.get()) {
-        // Supabase session present but no TestPilot token — exchange it
         exchangeSupabaseToken(session.access_token);
       } else if (!session && !tokenStore.get()) {
-        // No session at all — stop loading
         setLoading(false);
       }
     });
