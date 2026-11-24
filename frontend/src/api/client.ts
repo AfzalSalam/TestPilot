@@ -39,20 +39,28 @@ export async function request<T>(method: string, path: string, opts: { body?: un
   if (token) headers.Authorization = `Bearer ${token}`;
   if (opts.body !== undefined) headers["Content-Type"] = "application/json";
 
-  // Retry once on network error (handles Render free-tier cold starts ~30s)
-  let res: Response;
-  let lastError: unknown;
-  for (let attempt = 0; attempt < 2; attempt++) {
+  // Retry on network errors or Render hibernation (429 / 502 / 503 during cold starts)
+  let res: Response | undefined;
+  const maxAttempts = 6;
+  for (let attempt = 0; attempt < maxAttempts; attempt++) {
     try {
       res = await fetch(url, { method, headers, body: opts.body !== undefined ? JSON.stringify(opts.body) : undefined });
-      lastError = null;
+
+      // If Render is waking from hibernation, it returns 429 (hibernate-rate-limited) or 502/503/504
+      const isHibernating = res.status === 429 || res.status === 502 || res.status === 503 || res.status === 504;
+      if (isHibernating && attempt < maxAttempts - 1) {
+        await new Promise((r) => setTimeout(r, 4000));
+        continue;
+      }
       break;
-    } catch (err) {
-      lastError = err;
-      if (attempt === 0) await new Promise(r => setTimeout(r, 3000)); // wait 3s before retry
+    } catch {
+      if (attempt < maxAttempts - 1) {
+        await new Promise((r) => setTimeout(r, 4000));
+      }
     }
   }
-  if (lastError) {
+
+  if (!res) {
     throw new ApiError(0, "network_error", "Cannot reach the server — it may be waking up. Please try again in a few seconds.");
   }
 

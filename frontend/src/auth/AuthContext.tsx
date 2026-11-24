@@ -56,6 +56,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
       // Supabase OAuth succeeded; sign out Supabase client to prevent duplicate events & auto-refresh
       supabase.auth.signOut().catch(() => {});
     } catch (err) {
+      handledTokensRef.current.delete(accessToken);
       tokenStore.clear();
       setUser(null);
       console.error("Google sign-in exchange failed:", err);
